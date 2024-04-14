@@ -1,3 +1,3 @@
 # iPFS 
 
-This repository contains the article and the code for the iPFS (imPerfect Focus System)
+This repository contains the article "A software-based focus system for wide-field optical microscopy" also called iPFS (imPerfect Focus System) and the associated code and benchmarks.
