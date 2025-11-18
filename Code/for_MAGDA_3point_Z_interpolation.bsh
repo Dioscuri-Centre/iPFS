@@ -1,0 +1,113 @@
+/*
+ * this script focuses on the first i=0,1,2 positions from the position list
+ * and uses the corresponding Z values to interpolate between these positions
+ * to modify Z coordinates of the remaining i=3...N-1 positions
+ * 
+ */
+
+// parameters:
+double z_half_range=20 ; // in [um]. Sharpest image will be searched for within +/- this value 
+
+import org.micromanager.MultiStagePosition;
+import org.micromanager.StagePosition;
+import ij.IJ;
+import org.micromanager.data.Datastore;
+import org.micromanager.display.DisplayWindow;
+import org.micromanager.data.Coords;
+import org.micromanager.data.Image;
+import org.micromanager.acquisition.internal.AcquisitionSleepEvent;
+import java.util.List;
+import com.google.common.eventbus.Subscribe;
+import org.micromanager.acquisition.internal.DefaultAcquisitionEndedEvent;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+addClassPath("Z:\\Ilyas\\Beanshell\\sharpness.jar");
+import sharpness; 	
+
+xyStage = mmc.getXYStageDevice();
+zStageFocus = mmc.getFocusDevice();
+
+posList = mm.uiManager().getPositionList();
+list = posList.getPositions();
+		// Go to pos 0 (should already be the case)
+
+//  X,Y,Z coordinates of the three points used for interpolation
+double[] xs=new double[3] ;
+double[] ys=new double[3] ;
+double[] zs=new double[3] ;
+
+
+
+
+for (int npos=0;npos<3;npos++) {
+	
+	mm.live().setLiveMode(false);
+	pos = posList.getPosition(npos);
+	xs[npos]=pos.x ; 
+	ys[npos]=pos.y ;
+	pos.goToPosition(pos, mmc);
+	mmc.sleep(100); 
+
+	zpos=mmc.getPosition();
+//mm.scripter().message("z="+zpos) ;
+//mm.scripter().message("start moving") ;
+	mm.live().setLiveMode(true);
+
+	z1=zpos-z_half_range ;
+	z2=zpos+z_half_range ;
+	dz=z_half_range/4 ;
+	do {
+		mm.scripter().message("dz="+dz) ;
+		shmax=0 ;
+		for (z=z1;z<z2;z+=dz) {
+
+			mmc.setPosition(z) ;
+			mmc.sleep(100); // 50 may be enough
+			image = mm.live().snap(false).get(0);
+			sh=sharpness.compute(image) ;
+			//IJ.log("z="+z+" sharpness="+sh) ;
+   		if (sh>shmax) { shmax=sh ; zpos=z ; }
+   		mm.scripter().message("z="+z+" sharpness="+sh) ;	
+		}
+		z1=zpos-dz ;
+		z2=zpos+dz ; 
+		dz/=4.0 ;
+	} while (dz>0.1) ;
+	mm.scripter().message("best z="+zpos+" sharpness="+shmax) ;	
+	mmc.setPosition(zpos) ;
+	mmc.sleep(100); // 50 may be enough
+	zs[npos]=zpos ;
+}
+for (int i=0;i<3;i++) {
+	mm.scripter().message(i+": (x,y,z)=("+xs[i]+" "+ys[i]+" "+zs[i]+")") ;
+}
+
+/* interpolation
+*
+* we shall use the equation 
+* z = z0+ s*uz + t*vz
+* where s and t are calculated by solving the equation for points 1 and 2
+*/
+
+double ux=xs[1]-xs[0], uy=ys[1]-ys[0], uz=zs[1]-zs[0] ;
+double vx=xs[2]-xs[0], vy=ys[2]-ys[0], vz=zs[2]-zs[0] ;
+
+nn = posList.getNumberOfPositions() ;
+mm.scripter().message("updating Z for all "+nn+"positions") ;
+for (int i=0;i<nn;i++) {
+	sp = list[i].get(zStageFocus);
+	pos = posList.getPosition(i);
+
+	x=pos.x ; y=pos.y ;
+	w=ux*vy-vx*uy ;
+	s=(x-xs[0])*vy-(y-ys[0])*vx ; s/=w ;
+	t=ux*(y-ys[0])-uy*(x-xs[0]) ; t/=w ;
+	newz=zs[0]+s*uz+t*vz ;
+	mm.scripter().message(i+": old_z="+pos.z+" new_z="+newz) ;
+	
+	sp.set1DPosition(zStageFocus, newz);
+}
+posList.setPositions(list); //  replaces the position list used by the MDA 
+mm.positions().setPositionList(posList); // This just updates the visible position list   
+
+

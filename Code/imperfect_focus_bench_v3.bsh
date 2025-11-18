@@ -1,0 +1,256 @@
+// This script performs a round of "imperfect focus" for each position of a MDA 
+// TODO: perform proper scharr filter on the full
+// TODO: compare with previous image
+mm.acquisitions().clearRunnables();
+mm.getScriptController().resetInterpreter(); // reset variables, including functions
+
+
+// WIP 
+
+/* Only variables */
+
+int verbose = 2; // verbosity level 
+double z_step = 1.0;
+double z_range = 50.0;
+AfM=mm.getAutofocusManager();
+AfM.setAutofocusMethodByName("OughtaFocus");
+AfMM=AfM.getAutofocusMethod();
+//for (e: AfMM.getPropertyNames()){print(e);}
+AfMM.setPropertyValue("SearchRange_um",z_range.toString());
+AfMM.setPropertyValue("Tolerance_um",z_step.toString());
+AfMM.setPropertyValue("OptimizerStrategy","Brent");
+AfMM.setPropertyValue("Maximize","Redondo");
+//double[] focus_roi = {0.4,0.4,0.2,0.2}; // this roi is in percentage of the image size 
+
+
+
+import org.micromanager.MultiStagePosition;
+import org.micromanager.StagePosition;
+import ij.IJ;
+import ij.gui.GenericDialog;
+import org.micromanager.data.Datastore;
+import org.micromanager.display.DisplayWindow;
+import org.micromanager.data.Coords;
+import org.micromanager.data.Image;
+import org.micromanager.acquisition.internal.AcquisitionSleepEvent;
+import java.util.List;
+import com.google.common.eventbus.Subscribe;
+import org.micromanager.acquisition.internal.DefaultAcquisitionEndedEvent;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+import org.micromanager.imageprocessing.ImgSharpnessAnalysis; 
+import ij.plugin.ImageCalculator;
+import ij.ImagePlus;
+
+//File f = new File("Z:\\Ilyas\\Beanshell\\sharpness.jar");
+//File f = new File("/Users/idjafc/Code/Micro-manager/sharpness.jar");
+File f = new File("Z:\\Ilyas\\Beanshell\\sharpness.jar");
+if(f.isFile()){
+	addClassPath(f.toString());
+}
+else{
+	throw new Exception("Couldn't import sharpness function, is the drive mounted as Z:?");
+}
+
+import sharpness; 
+calculator = new ImageCalculator();
+
+
+compute_sh_score(){
+						 image = mm.live().snap(true).get(0);
+						 // standard imperfect focus sharpness 
+						//	 sh=sharpness.compute(image);
+						// replace our sharpness function by something more isotropic 
+						 // first get an imageJ processor 
+						 ip = mm.data().ij().createProcessor(image);
+						 imp = new ImagePlus("",ip);
+						 //ip.convolve3x3(kern);
+	//					 ip.findEdges();
+	//					 sh = ip.getStats().mean;
+						 
+						 sh = imgsharp.computeRedondo(ip);
+
+return sh;
+}
+// This 'class' stores some attributes of the dot like its position, the file it is saved to etc.
+Exp(n){   
+   int pos = 0;
+   int npos = n;
+   int t = 0;
+	dir_proto = mm.acquisitions().getAcquisitionSettings().root()+"/"+mm.acquisitions().getAcquisitionSettings().prefix()+"_";
+	int i=0;
+	dir_orig = null;
+	dir_name = null;
+	has_started = false;
+	has_started2 = false;
+	writer = null;
+	writer2 = null; 
+	do{
+		i++;  
+		dir_orig = new File(dir_proto+i);
+		dir_name = new File(dir_proto+"dot_"+i);
+	}
+	while( dir_orig.isDirectory() || dir_name.isDirectory());
+
+	out_file = dir_orig+"/logs_sharpness.txt";
+	out_file2 = dir_orig+"/logs_sharpness_raw.txt";
+	print("logs will be saved to "+ out_file);
+	save_log(str){ 
+		if ( ! has_started){ 
+			writer = new BufferedWriter(new FileWriter(out_file)); 
+			writer.write("t " + "\t" + "idx" + "\t" + "z" + "\t" +"sh_max " + "\t" + "time" + "\n" );
+			has_started = true;
+		}
+		writer.write(str);
+		
+		if (pos == 0) { 
+			writer.write("\n");
+		} 
+		writer.flush();
+	}
+	inc(){
+		pos = (pos+1) % npos; 
+		if (pos == 0) {t+=1;}
+	}
+	save_log_raw(str){ 
+		if ( ! has_started2){ 
+			writer2 = new BufferedWriter(new FileWriter(out_file2)); 
+			writer2.write("t " + "\t" + "idx" + "\t" + "z" + "\t" +"sh " + "\t" + "time" + "\n" );
+			has_started2 = true;
+		}
+		writer2.write(str);
+		
+		writer2.flush();
+	}
+	
+   end(){
+   	if (writer != null ) {
+   		writer.close();
+   		writer2.close();
+   		}
+   }
+	return this;
+}
+
+public class NowString {
+    public static String getTime() { 
+          SimpleDateFormat df = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss.SSS");//Set the date format
+          String date = df.format(new Date());//new Date() is to get the current system time
+          return date;
+    }
+}
+
+// Replace the position at index idx with new z 
+set_new_pos(idx,z){
+	posList = mm.uiManager().getPositionList(); // current position list 
+	// modify initial positions 
+	pos = posList.getPosition(idx);
+	zpos = pos.get(zDrive);
+	zpos.set1DPosition(zDrive,z);
+
+//	posList.setPositions(list); //  replaces the position list used by the MDA 
+//	mm.positions().setPositionList(posList); // This just updates the visible position list   
+
+posList.replacePosition(idx,pos); //  replaces the position list used by the MDA 
+mm.positions().setPositionList(posList); // This just updates the visible position list   
+}
+
+
+do_autofocus() {
+			idx= exp.pos; 
+			print(idx);
+
+			// DO NOT USE THE LIVE MODE HERE 
+			mmc.setAutoShutter(false); // disable auto shutter 
+			mmc.setShutterOpen(true);  // keeps the shutter open
+
+			t00 =  System.nanoTime();
+			//zpos=mmc.getPosition();
+			//autocofus
+			
+			
+			
+			
+			
+			//compute the z-offset
+			//offset=zpos-mmc.getPosition();
+			
+			
+			// get position index
+			sh=0 ;
+			sh_max=0 ;
+			dz_max=0 ;
+			z = mmc.getPosition();
+			imp_prev = null;
+			n = (int) ((double)z_range/(double) z_step) + 1 ;
+			i = 0;
+			long[] dt = new long[n]; 
+			t00 =  System.nanoTime();
+			if (verbose>0) mm.scripter().message("start: autofocus at position " + idx);
+
+			AfMM.fullFocus();
+			sh_max =  compute_sh_score(); // AfMM.getCurrentFocusScore();
+			//exp.save_log_raw("\n");
+			if (verbose > 0 ) mm.scripter().message("end: autofocus at position " + idx);
+//			if (verbose > 1){
+//				for(i=0;i<n;i++) print(i + "\t" + dt[i]/1000000 + "ms per iteration \t");
+//			}	
+			//dz_max = 1.0; //simulate an offset
+			dz_max = mmc.getPosition() - z;
+			z+=dz_max ; // update z
+		
+			mm.scripter().message("z(max_sharpness)="+z+" sharpness="+sh_max);	
+			IJ.log("date:"+NowString.getTime()+",pos"+idx+" ,z(max_sharpness)="+z+" ,sharpness="+sh_max + " ,offset=" + dz_max) ;			
+
+			mmc.setAutoShutter(true); // re-enable auto shutter 
+			//mmc.setShutterOpen(false);  // close the shutter
+			// replace position in position list
+			set_new_pos(idx,z);
+			// and move to new position 
+			//mmc.setPosition(z);
+			//give it some time to sleep 
+			//mmc.sleep(100);
+			ttot =  (System.nanoTime() - t00)/1000000;
+			print("total runtime" + ttot + "ms.");
+			//exp.save_log( exp.t + "\t" + idx + "\t" + z + "\t" + sh_max  + "\t" + NowString.getTime() + "\n");
+			// increment counters
+			exp.inc(); 
+
+}
+
+autofocus_oneshot = new Runnable () {	
+ 	public void run() {
+		do_autofocus();
+		};
+};
+
+
+
+// name of stages 
+zDrive = mmc.getFocusDevice();
+xyDrive = mmc.getXYStageDevice();
+
+// Prepare acquisition 
+n_frames = mm.acquisitions().getAcquisitionSettings().numFrames();
+nr_pos = mm.positions().getPositionList().getNumberOfPositions();
+nr_slices= mm.acquisitions().getAcquisitionSettings().slices().size();
+channels= mm.acquisitions().getAcquisitionSettings().channels();
+nr_channels = 0;
+used_channels = new ArrayList();
+for (c : channels) {
+	if(c.useChannel()) {
+		used_channels.add(c);
+		nr_channels++;
+	}
+}	
+
+imgsharp = new ImgSharpnessAnalysis();
+
+mm.acquisitions().clearRunnables();
+exp = Exp(nr_pos);
+
+
+
+//mm.acquisitions().attachRunnable(-1, -1,-1,-1, autofocus_oneshot);
+//mm.acquisitions().runAcquisition();
+//exp.end();
