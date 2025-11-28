@@ -1,0 +1,559 @@
+// Imperfect focus script
+
+//before you start:
+// 1. determine exposure times etc
+//  MAKE SURE YOU HAVE SELECTED THE CORRECT FILTER (the variable filter="...")
+// the filter should ideally be the same you use for brighfield imaging of the sample
+// 2. set all positions in the position list, including the "dot" as position 0
+// 3. save the list of positions
+// Before you start multi-d acquisition:
+// 1. load in the list of positions
+// 2. set up multi-d acquisition first, then run this script!
+// 3. finally, start multi-d aqc
+
+// Changelog: 
+// V2.3: version of the runnnables script:
+// uses a different optimization routine that searches for a global maximum in a certain range of z values
+// V2.4: Adds a drop down menu to select the filter 
+// V2.5 (05/05/2022): Shows the autofocus region as an overlay 
+// V2.6 (11/05/2022): - Adds an interface to select imperfect-focus parameters
+//                    - Put back fast sharpness function (using java compiled code)
+// V2.6.0.1 (08/09/2022): fix the exposure setting to the channel/filter one selected in the "autofocus GUI"
+// V2.6.0.2 (15/09/2022): fix the "shuffling" bug by prematurely interrupting the autofocus loop
+// V2.6.1 (??/05/2022): - Adds a check for the sharpness function binary location 
+// V2.6.2 (26/05/2022): - (Optional) save the best in focus dot in a file. 
+//                      - also save the dot logs 
+// V2.6.2_merge (09/11/2022): merge V2.6.0.2 and V2.6.2 which were leaving in different places ...
+// V2.7.0 (27/04/2023): handle PFS, use redondo on full image, fix the pb with live view 
+//                     - fix a bug with the getchannelfromname function
+//							  - fix a potential bug in the saving of the dot (use copyatcoords instead)
+// V2.7.1 (09/07/2024): add mode output to fix a bug that doesn't exist...
+// V2.7.2 (11/07/2024): (bugfix) start the first event for each timepoint which fixes multi-d
+// 									   acquisitions with different number of z-stacks
+// V2.7.3 (12/07/2024): run autofocus once at t=0
+// V2.7.5 (14/11/2025): add back a roi
+
+
+mm.getScriptController().resetInterpreter(); // reset variables, including functions
+JOptionPane.showMessageDialog(null, "Make sure that everything is correctly set on the MDA : \n"+ 
+"1. determine exposure times etc \n2. set all positions in the position list,including the 'dot' as position 0 \n"+
+"Then, can now click OK \n"+
+"In the next window you will be asked to select the filter and objectives to perform the (im)perfect-focus"
+, "Info" , JOptionPane.INFORMATION_MESSAGE);
+
+/* Only variables */
+/* objective name, z_step,z_range*/
+obj_params = new Hashtable();	
+obj_params.put("100X",new Object[] {0.25,10.0});
+obj_params.put("40X normal",new Object[] {0.1,3.0});
+obj_params.put("40X ELWD",new Object[] {0.1,10.0});
+obj_params.put("20X",new Object[] {0.5,5.0});
+obj_params.put("10X", new Object[] {1.0,3.0});
+int safe_delay = 5000; // delay between the end of the autofocus routine and the next timepoint 
+boolean SAVE_DOT = true; // save the dot ?
+boolean verbose = true; // more verbose output (keep it false)
+String filter_group = "Filter"; // name of the filter group 
+//String objective_group = "Objective"; // name of the filter group 
+list_channels = mmc.getAvailableConfigGroups().toArray();
+double[] focus_roi = {0.4,0.4,0.2,0.2}; // this roi is in percentage of the image size 
+//String filter = "1-None"; /* name of the filter used for the autofocus 
+// (should be the same as the non fluorescent one) */
+
+import org.micromanager.MultiStagePosition;
+import org.micromanager.StagePosition;
+import ij.IJ;
+import ij.gui.GenericDialog;
+import org.micromanager.data.Datastore;
+import org.micromanager.display.DisplayWindow;
+import org.micromanager.data.Coords;
+import org.micromanager.data.Image;
+import org.micromanager.acquisition.internal.AcquisitionSleepEvent;
+import java.util.List;
+import com.google.common.eventbus.Subscribe;
+import org.micromanager.acquisition.internal.DefaultAcquisitionEndedEvent;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+import org.micromanager.imageprocessing.ImgSharpnessAnalysis; 
+import ij.plugin.ImageCalculator;
+import ij.ImagePlus;
+
+import sharpness; 
+calculator = new ImageCalculator();
+//File f = new File("Z:\\Ilyas\\Beanshell\\sharpness.jar");
+//File f = new File("/Users/idjafc/Code/Micro-manager/sharpness.jar");
+File f = new File("Z:\\Ilyas\\Code\\Beanshell\\sharpness.jar");
+if(f.isFile()){
+	addClassPath(f.toString());
+}
+else{
+	throw new Exception("Couldn't import sharpness function, is the drive mounted as Z:?");
+}
+
+import sharpness; 
+
+
+// This 'class' stores some attributes of the dot like its position, the file it is saved to etc.
+Dot(pos){   
+   int curFrame = 0;
+	dir_name = mm.acquisitions().getAcquisitionSettings().root()+"/"+mm.acquisitions().getAcquisitionSettings().prefix()+"_";
+	i=1;
+	while( new File(dir_name+i).isDirectory()){
+		i++;  
+	}
+	dir_name = dir_name+"dot_"+i;
+	if (!SAVE_DOT){
+	new File(dir_name).mkdirs();
+	}
+	dot_store = null;
+	pos = pos; 
+	cb = mm.data().getCoordsBuilder().z(0).c(0).p(0).t(0);
+	print("dot will be saved to "+ dir_name);
+	save_dot(image){
+		if (dot_store == null){
+				dot_store = mm.data().createMultipageTIFFDatastore(dir_name,true,false) ;
+				mmc.sleep(2000);
+		}
+		print(dot_store);
+		
+		if (image == null){
+			//tagged = mmc.popNextTaggedImage();
+			image = mm.live().snap(false).get(0);
+			// Convert to an Image at the desired channel.
+			image = image.copyAtCoords(cb.t(curFrame).build());
+			//image = mm.data().convertTaggedImage(tagged,cb.t(curFrame).build(), null);
+		}
+		dot_store.putImage(image);
+		curFrame++;
+	}
+	
+   close(){
+		IJ.selectWindow("Log");
+		IJ.saveAs("Text", dir_name+"/log_dot.txt");
+   	dot_store.freeze();
+      dot_store.close();
+   }
+	return this;
+}
+
+
+// and this class stores the sharpness 
+Exp(n,dir){   
+   int pos = 0;
+   int npos = n;
+   int t = 0;
+	dir_proto = mm.acquisitions().getAcquisitionSettings().root()+"/"+mm.acquisitions().getAcquisitionSettings().prefix()+"_";
+	int i=0;
+	dir_orig = null;
+	dir_name = null;
+	has_started = false;
+	has_started2 = false;
+	writer = null;
+	writer2 = null; 
+	if (dir == null){
+		do{
+			i++;  
+			dir_orig = new File(dir_proto+i);
+			dir_name = new File(dir_proto+"dot_"+i);
+		}
+		while( dir_orig.isDirectory() || dir_name.isDirectory());
+	}
+	else{
+		dir_orig= dir;
+	}
+	out_file = dir_orig+"/logs_sharpness.txt";
+	out_file2 = dir_orig+"/logs_sharpness_raw.txt";
+	print("logs will be saved to "+ out_file);
+	save_log(str){ 
+		if ( ! has_started){ 
+			writer = new BufferedWriter(new FileWriter(out_file)); 
+			writer.write("t " + "\t" + "idx" + "\t" + "z" + "\t" +"sh_max " + "\t" + "time" + "\n" );
+			has_started = true;
+		}
+		writer.write(str);
+		
+		if (pos == 0) { 
+			writer.write("\n");
+		} 
+		writer.flush();
+	}
+	inc(){
+		pos = (pos+1) % npos; 
+		if (pos == 0) {t+=1;}
+	}
+	save_log_raw(str){ 
+		if ( ! has_started2){ 
+			writer2 = new BufferedWriter(new FileWriter(out_file2)); 
+			writer2.write("t " + "\t" + "idx" + "\t" + "z" + "\t" +"sh " + "\t" + "time" + "\n" );
+			has_started2 = true;
+		}
+		writer2.write(str);
+		
+		writer2.flush();
+	}
+	
+   end(){
+   	if (writer != null ) {
+   		writer.close();
+   		writer2.close();
+   		}
+   }
+	return this;
+}
+
+
+public class NowString {
+    public static String getTime() { 
+          SimpleDateFormat df = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");//Set the date format
+          String date = df.format(new Date());//new Date() is to get the current system time
+          return date;
+    }
+}
+
+// get a channel by its name
+getchannelwithname(name){for (c:all_channels){ if(c.config().equals(filter)) return c;}}
+
+selectFocusDevices() {
+		GenericDialog param = new GenericDialog( "Select autofocus parameters", IJ.getInstance() );
+		// filter settings
+		if(mmc.getAvailableConfigs(filter_group).isEmpty()){
+			throw new Exception("Make sure Channel group "+filter_group+" exists"); 
+		}		
+		list_channels = mmc.getAvailableConfigs(filter_group).toArray();
+		param.addChoice("Filters", list_channels,list_channels[0]);
+
+//		if(mmc.getAvailableConfigs(objective_group).isEmpty()){
+//			throw new Exception("Make sure Objective group "+objective_group+" exists"); 
+//		}
+
+		//objective settings
+		list_objectives = new ArrayList(obj_params.keySet());
+		list_objectives_arr = new String[obj_params.size()];
+		used_channels = new ArrayList();
+		for (i = 0; i < obj_params.size();i++ ) {
+				list_objectives_arr[i] = list_objectives.get(i);
+		}
+
+		list_obj_arr = list_objectives.toArray();
+		param.addChoice("Objective", list_objectives_arr,list_objectives_arr[0]);
+		param.addNumericField("Exposure", 10.0, 1);
+		param.showDialog();
+		if( !param.wasCanceled() ) {
+			filter = param.getNextChoice();
+			objective = param.getNextChoice();
+			af_exposure = param.getNextNumber();
+			z_step = obj_params.get(objective)[0];
+			z_range = obj_params.get(objective)[1];
+			
+			Object[] ret = {filter,z_step,z_range,af_exposure};
+			return ret;
+		} else
+			throw new Exception("You have cancelled the script, abort"); 
+}
+
+
+// add a roi to the image      
+import ij.WindowManager;
+add_roi(dot_pos){
+	x0 = dot_pos.x;
+	y0 = dot_pos.y;
+	z0 = dot_pos.z; 
+	z = z0;
+	mmc.setXYPosition(x0,y0);
+	mmc.setPosition(z0);
+	mm.live().setLiveMode(true);
+	
+	imp = WindowManager.getCurrentImage();
+	while(imp== null){
+		mmc.sleep(100); 
+		imp = WindowManager.getCurrentImage();
+	}
+	
+	width = imp.getWidth();
+	height = imp.getHeight();
+	int x0=width*focus_roi[0];
+	int y0=height*focus_roi[1];
+	int w=width*focus_roi[2], h=height*focus_roi[3];
+	imp.killRoi();
+	imp.setRoi(x0,y0,w,h);
+} 
+
+// Roi related functions 
+// Check if the ROI is correct 
+CheckGoodFocusRegion(pos){
+Object[] options = { "OK", "CANCEL" };
+add_roi(pos);
+isfocused =  JOptionPane.showOptionDialog(null, "The region where the dot is focused on is displayed as an overlay"
+															  +", is that where you want to focus ?"
+, "Info" ,JOptionPane.DEFAULT_OPTION, JOptionPane.WARNING_MESSAGE,null, options, options[0]);
+if (isfocused == 1) {throw new Exception("You have cancelled the script, abort");} 
+}
+
+
+
+
+// in place change of the actual MDA position list ( the uiManager call),
+// cf https://forum.image.sc/t/micro-manager-mda-doesnt-use-updated-positionlist-during-acquisition/48095/7
+				
+shift_pos_list(offset){
+				posList = mm.uiManager().getPositionList(); // current position list 
+				list = posList.getPositions(); // current positions
+				// modify initial positions 
+				for (msp : list) {
+					sp = msp.get(zDrive);
+					verbose ? print("before,Z=:"+sp):null;
+					sp.set1DPosition(zDrive, sp.get1DPosition() + offset);
+					verbose ? print("after,Z=:"+sp):null;
+				}
+				
+				posList.setPositions(list); //  replaces the position list used by the MDA 
+				mm.positions().setPositionList(posList); // This just updates the visible position list   
+}
+
+// Adds the dot position at the end of the acquisition (premature or not)
+add_dot = new Runnable() {
+   public void run() {
+		wait_for_acq_ending = new Thread(){ 
+			public void run() {
+			   while (mm.acquisitions().isAcquisitionRunning()){
+			   	Thread.sleep(1000);
+			   }
+
+				// copy initial position list  
+	  		   posDot = new MultiStagePosition(xyDrive,x0,y0,zDrive,z);                                                                                                                                
+            posDot.setLabel("Dot");                                                                                                                                                            
+            posList.addPosition(0,posDot);                                                                                                                                                     
+            mm.positions().setPositionList(posList);
+				dot.close();             
+				exp.end();                                                                                                                  
+            print("Acquisiton done");
+		   }
+		};
+		wait_for_acq_ending.start();
+	}
+};
+
+// returns the time till the next acquisition 
+next_wake_delay(eng){return eng.getNextWakeTime()- System.nanoTime() / 1000000.0;}
+
+
+
+
+//this function runs at the end of each timeframe (i.e at the last coordinate of the n-d acquisition)
+// It waits for the acquisition to "sleep"  
+//we will go back to the dot, compute its drift and correct the position list  by the correct offset 
+
+runnable = new Runnable () {
+	boolean first_timepoint = true; 
+ 	public void run() {
+	    i+=1;
+	    z_init = z; 
+	    eng = mm.acquisitions().getAcquisitionEngine();
+		
+	    autofocus = new Thread(){ 
+		   public void run() {
+			cnt = 0;
+			//max_tries = 10;
+			sh_max_prev = 0;
+			sh_max = 0; // needs to be defined here to be logged
+			idx = 0; // there's only one dot 
+			if (verbose){print("autofocus routine started");}
+			// Wait for at most 10s (10 tries)
+			if(!first_timepoint){
+				while(next_wake_delay(eng) < 0 && mm.acquisitions().isAcquisitionRunning() ){
+				    verbose ? print(next_wake_delay(eng)): null;
+				    Thread.sleep(1000);
+				    cnt++;
+				    
+				    print("waiting for acquisition to pause");
+				    //if(cnt==max_tries){
+				   //	print("Cannot autofocus after 10 seconds");
+					//return;
+				    //}
+				}
+			}
+			// set position and set green filter
+			mmc.setConfig(filter_group,filter) ;
+			if(verbose) print("Exposure before:"+mmc.getExposure());
+			mmc.setExposure(af_exposure);
+			if(verbose) print("Exposure set to:"+mmc.getExposure());
+			mmc.setXYPosition(x0,y0);
+
+			
+			// DO NOT USE THE LIVE MODE HERE 
+			mmc.setAutoShutter(false); // disable auto shutter 
+			mmc.setShutterOpen(true);  // keeps the shutter open
+			while( (next_wake_delay(eng) > safe_delay) || first_timepoint ) {
+			    if(!mm.acquisitions().isAcquisitionRunning()){
+				print("Acquisition done, exiting autofocus routine");
+				return;
+			    }
+				
+			    sh=0 ;
+			    sh_max=sh_max_prev ;
+			    dz_max=0 ;
+			    
+			    imp_prev = null;
+			    for (dz=-z_range/2;dz<=z_range/2;dz+=z_step) {
+				if((next_wake_delay(eng) < safe_delay) && (!first_timepoint) ){
+				    dz_max = 0; // prevent dz to be updated
+				    sh_max = sh_max_prev;
+				    if(verbose)  print("prematurely breaking the loop,"+next_wake_delay(eng)+"ms left");
+				    break;
+				}
+				
+				mmc.setPosition(z+dz) ;  
+				mmc.sleep(100) ;
+				image = mm.live().snap(false).get(0);	
+				
+				//sh=sharpness.compute(image) ;
+				// first get an imageJ processor 
+			  	ip = mm.data().ij().createProcessor(image);
+				imp = new ImagePlus("",ip);
+				//add_roi(pos0);
+
+				width = ip.getWidth();
+				height = ip.getHeight();
+				int roi_x0=width*focus_roi[0];
+				int roi_y0=height*focus_roi[1];
+				int roi_w=width*focus_roi[2], roi_h=height*focus_roi[3];
+				ip.setRoi(roi_x0,roi_y0,roi_w,roi_h);
+				sh = imgsharp.computeRedondo(ip);
+				
+				 if (imp_prev != null){
+				     //compute difference 
+				    
+				     imp2 = calculator.run( "subtract create 32-bit" , imp, imp_prev);
+				     ip2 = imp2.getProcessor(); // get ShortProcessor from ImagePlus
+				     ip2.abs(); // absolute value (doesn't return anything) 
+				     diff = ip2.getMax(); 
+	
+				    // detect error 
+				    if ( diff < 1.0 ){
+					    error("found duplicate image at time" + i );
+					    continue;
+				    }
+				 }
+				// update 
+				
+				imp_prev=imp;
+				if (sh>sh_max) { sh_max=sh ; dz_max=dz ; }
+			
+				//   	mm.scripter().message("zpos="+(zpos0+dz)+" sharpness="+sh) ;
+					IJ.log((z+dz)+" "+sh);
+				 	exp.save_log_raw( exp.t + "\t" + idx + "\t" + (z+dz) + "\t" + sh + "\t" + NowString.getTime() +"\n");    	
+			    }
+			    sh_max_prev = sh_max; // keep sharpness in memory
+			    z+=dz_max ; // update z
+			    mm.scripter().message("z(max_sharpness)="+z+" sharpness="+sh_max) ;	
+			    IJ.log("z(max_sharpness)="+z+" sharpness="+sh_max) ;
+			    if (first_timepoint) {break;}		
+			}
+			print( exp.t + "\t" + idx + "\t" + z + "\t" + sh_max  + "\t" + NowString.getTime() + "\n");
+			exp.save_log( exp.t + "\t" + idx + "\t" + z + "\t" + sh_max  + "\t" + NowString.getTime() + "\n");
+			// increment counters
+			exp.inc(); 
+			
+			mmc.setAutoShutter(true); // re-enable auto shutter 
+			mmc.setShutterOpen(false);  // close the shutter
+				
+			// now, apply the offset, courtesy of : 
+			// https://forum.image.sc/t/micromanager-autofocus-routine-on-only-one-position-then-apply-offset-to-all-positions/47582/6
+				
+			offset = z-z_init;
+			//offset = 1.0; //simulate an offset
+				
+			tot_offset = z-z0; // total offset (for logging)
+			IJ.log("date:"+NowString.getTime()+"total offset="+tot_offset);			
+		
+			// in place change of the position list 
+			shift_pos_list(offset);
+
+			// save the best in focus dot image 
+			if(SAVE_DOT){
+			mmc.setPosition(z);
+			dot.save_dot(null);
+			}
+			// Go back to the first position and to the right filter, just to save time 
+			pos_next = posList.getPosition(0);
+			mmc.setXYPosition(pos_next.x,pos_next.y);
+			mmc.setPosition(pos_next.z);
+			mmc.setConfig(filter_group,used_channels.get(0).config());
+			mmc.setExposure(used_channels.get(0).exposure());
+			
+			return;}  
+		};
+		if(first_timepoint){
+			autofocus.run();
+			first_timepoint = false;
+		}
+		else{
+		 print("start");
+	    autofocus.start();
+		}   		
+	}
+    };
+
+
+i=1; // timepoints index 
+// name of stages 
+zDrive = mmc.getFocusDevice();
+xyDrive = mmc.getXYStageDevice();
+
+// Set parameters used for autofocus (filter,objective ...)
+devs = selectFocusDevices(); 
+filter = devs[0];
+z_step = devs[1];
+z_range = devs[2];
+af_exposure = devs[3];
+//params_focus = getFocusParams(objective);
+//z_step = params_focus[0];
+//z_range = params_focus[1];
+
+// Prepare acquisition 
+posList = mm.getPositionListManager().getPositionList();
+// copy initial position list
+posList0 = mm.getPositionListManager().getPositionList();													 
+// get the position of the dot (x,y an z)
+pos0 = posList.getPosition(0);
+x0 = pos0.x;
+y0 = pos0.y;
+z0 = pos0.z; 
+z = z0;
+
+CheckGoodFocusRegion(pos0);
+//remove it from the acquisition positon list 
+posList.removePosition(0);//remove dot position
+mm.getPositionListManager().setPositionList(posList);                                                                
+                                                  
+
+dot = Dot(pos0);
+if(SAVE_DOT){
+dot.save_dot(null);
+}
+print("dot saved");
+n_frames = mm.acquisitions().getAcquisitionSettings().numFrames();
+nr_pos = posList.getNumberOfPositions();
+nr_slices= mm.acquisitions().getAcquisitionSettings().slices().size();
+// this one is tricky 
+channels= mm.acquisitions().getAcquisitionSettings().channels();
+nr_channels = 0;
+used_channels = new ArrayList();
+for (c : channels) {
+	if(c.useChannel()) {
+		used_channels.add(c);
+		nr_channels++;
+	}
+}	
+
+if (nr_pos < 2) { throw new Exception("You need at least 2 positions");}
+imgsharp = new ImgSharpnessAnalysis();
+mm.acquisitions().clearRunnables(); // this is needed to clear the runnables list 
+exp = Exp(1,dot.dir_name);
+mm.acquisitions().attachRunnable(0, 0, 0, 0, runnable);
+mm.acquisitions().attachRunnable(-1,1, 0, 0, runnable);
+mm.acquisitions().attachRunnable(0,0, 0, 0, add_dot);
+mm.acquisitions().runAcquisition();
+//
+
+
+
